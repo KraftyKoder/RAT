@@ -34,9 +34,10 @@ mapY = 0
 OVERLAY_TOL = 10  # max distance to shift maps while overlaying
 # ANGLE_TOL = 0 # max angle to shift maps while overlaying
 
-EXPLORE_SENS = 5
+VALID_POS_THRESHOLD = 1
+EXPLORE_SENS = 8
 PATH_LIMIT = 100
-PATH_SMOOTHNESS = 5
+PATH_SMOOTHNESS = 7
 
 # Store map overlay offsets after calculating for first time
 # Initialize to values greater than OVERLAY_TOL, to indicate they haven't been set yet
@@ -61,7 +62,7 @@ def convertMapIndToWorldCoords(xInd, yInd):
 def updateMap(lidarBuf, fellowRat, npts):
     global mazeMap
 
-    LIDAR_ANGLE_DEADBAND = np.radians(30)
+    LIDAR_ANGLE_DEADBAND = np.radians(20)
     LIDAR_DIST_CUTOFF = 30
 
     for i in range(npts):
@@ -181,7 +182,7 @@ def explore(dirPref=None):
     validPos = np.zeros(MAP_SIZE, dtype=np.bool)
     for x in range(ratGridSize, MAP_SIZE[1]-ratGridSize):
         for y in range(ratGridSize, MAP_SIZE[0]-ratGridSize):
-            if (np.sum(mazeMap[y-ratGridSize:y+ratGridSize+1, x-ratGridSize:x+ratGridSize+1]) == 0):
+            if (np.sum(mazeMap[y-ratGridSize:y+ratGridSize+1, x-ratGridSize:x+ratGridSize+1]) <= VALID_POS_THRESHOLD):
                 validPos[y, x] = 1
     #print("Valid Spots")
     #print(validPos*1)
@@ -200,70 +201,13 @@ def explore(dirPref=None):
 
     #return pathFinder([mapX, mapY], junctions, 1, dirPref=dirPref)
     rawPath = pathFinderIterative([mapX, mapY], junctions, dirPref=dirPref)
+
+    # # Check path distance, if short return empty path
+    # wX, wY = convertMapIndToWorldCoords(mapX, mapY)
+    # if (rawPath.size > 0 and np.sqrt((wX - rawPath[-1,0])**2 + (wY - rawPath[-1,1])**2) < 5):
+    #     rawPath = np.empty([0,2])
+    
     return pathSmoother(rawPath)
-
-
-# Recursive DFS function to find path from current position to open section of maze or to target
-def pathFinder(curPos, junctions, callNum, dirPref=None):
-    # Get current state
-    curVal = junctions[curPos[1], curPos[0]]
-    junctions[curPos[1], curPos[0]] = 0  # Mark current spot as invalid, so we don't double back to it
-    # print(junctions)
-
-    # Get neighboring states 
-    # (Ensure indices are in bounds)
-    openIndLowX = curPos[0]-EXPLORE_SENS
-    openIndLowX *= (openIndLowX > 0)
-    openIndHighX = curPos[0]+EXPLORE_SENS+1
-    if (openIndHighX > MAP_SIZE[1]):
-        openIndHighX = MAP_SIZE[1]
-    openIndLowY = curPos[1]-EXPLORE_SENS
-    openIndLowY *= (openIndLowY > 0)
-    openIndHighY = curPos[1]+EXPLORE_SENS+1
-    if (openIndHighY > MAP_SIZE[0]):
-        openIndHighY = MAP_SIZE[0]
-
-    localMap = junctions[curPos[1]-1:curPos[1]+2:, curPos[0]-1:curPos[0]+2]
-    openMap = junctions[openIndLowY:openIndHighY, openIndLowX:openIndHighX]
-    
-    # Base case 1: reached dead end
-    if (np.sum(localMap) == 0):
-        return np.empty([0, 2])
-    
-    # Base case 2: open section of map or target is found, or max path length reached
-    # (open criteria: at least half of elements within EXPLORE_SENS of current position are 4-way junctions)
-    if (not goalFound and curVal == 4 and np.sum(openMap) > (np.size(openMap)/2 * 4) or 
-            (goalFound and curVal == 5) or
-            callNum == PATH_LIMIT):
-        targetWorldX, targetWorldY = convertMapIndToWorldCoords(curPos[0], curPos[1])
-        return np.array([[targetWorldX, targetWorldY]])
-
-    # Next location to traverse to
-    # If direction preference given, set next target to that location
-    # If goalFound, set direction preference towards goal
-    if goalFound:
-        delX = goalLoc[0] - curPos[0]
-        delY = curPos[1] - goalLoc[1]
-        dirPref = np.arctan2(delY, delX)
-    if dirPref != None:
-        dirToLook = [np.cos(dirPref) > 0.5, np.sin(dirPref) > 0.5]  # [x dir, y dir]
-        targetPos = (curPos[0] + dirToLook[0], curPos[1] - dirToLook[1])  # [xInd, yInd]    
-    # If no direction preference given or preferred direction is invalid, go to max neighboring junction
-    if (dirPref == None or junctions[targetPos[1], targetPos[0]] == 0):
-        localMaxInd = np.argmax(localMap)
-        targetPos = [curPos[0] + (localMaxInd%3-1), curPos[1] + (localMaxInd//3 - 1)]
-    
-    # Recursive step: move to target location, search for path from there
-    restOfPath = pathFinder(targetPos, junctions, callNum + 1, dirPref)
-    # If path leads to dead end, try another path from the current location
-    # (Path leading to dead end has been filled with zeros during the 
-    # traversal, so calling function again will find a new path from curPos)
-    if (np.size(restOfPath) == 0):
-        return pathFinder(curPos, junctions, callNum + 1, dirPref)
-    else:
-        targetWorldX, targetWorldY = convertMapIndToWorldCoords(curPos[0], curPos[1])
-        return np.concatenate((np.array([[targetWorldX, targetWorldY]]), restOfPath), axis=0)  # Valid path to opening
-    
 
 def pathFinderIterative(startPos, junctions, dirPref=None):
     callNum = 1 # Track number of iterations
@@ -342,7 +286,7 @@ def pathFinderIterative(startPos, junctions, dirPref=None):
 # Moving average smoothing of waypoints
 def pathSmoother(wayPts):
     numPts = wayPts.shape[0]
-    # If path short, do directly to target
+    # If path short, go directly to target
     if (numPts < PATH_SMOOTHNESS):
         return wayPts
     smoothPath = np.empty([0,2])
@@ -361,11 +305,12 @@ def pathSmoother(wayPts):
     return smoothPath
 
 def printPath(path):
-    pathMap = np.zeros(MAP_SIZE, dtype=np.uint8)
-    for i in range(path.shape[0]):
-        mX, mY = convertWorldCoordstoMapInd(path[i,0], path[i,1])
-        pathMap[mY, mX] = 9
-    print(pathMap)
+    print(path)
+    # pathMap = np.zeros(MAP_SIZE, dtype=np.uint8)
+    # for i in range(path.shape[0]):
+    #     mX, mY = convertWorldCoordstoMapInd(path[i,0], path[i,1])
+    #     pathMap[mY, mX] = 9
+    # print(pathMap)
 
 # Functions for dedugging and testing
 # (Not part of final code)

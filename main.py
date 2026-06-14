@@ -6,6 +6,7 @@
 
 try:
   import time
+  import ulab as np
 except:
   print("ESP Module not available")
 
@@ -13,14 +14,18 @@ import ratware
 import comms
 import mapping
 
+INIT_SCAN_TIME = 10
+
 def init():
   comms.initComms()
   ratware.initRatware()
 
-  # Read in surroundings for INIT_SCAN_TIME
-  # for i in range(0, INIT_SCAN_TIME * 1/ratware.TIME_STEP):
-  #   ratware.sweep()
-  #   time.sleep(ratware.TIME_STEP)
+  #Read in surroundings for INIT_SCAN_TIME
+  for i in range(0, INIT_SCAN_TIME / ratware.TIME_STEP):
+    ratware.sweep()
+    if (ratware.swpDone):
+      ratware.processLidarBuffer()
+    time.sleep(ratware.TIME_STEP)
 
   print("RAT INITIALIZATION SUCCESS")
 
@@ -33,17 +38,20 @@ def loop():
       ti = time.ticks_ms()
       ratware.path = mapping.explore(ratware.worldDir)
       ratware.lastPathTime = time.ticks_ms()
-      print("path made in [ms]:")
-      #print(mapping.printPath(ratware.path))
+      #print("path made in [ms]:")
+      print(mapping.printPath(ratware.path))
       ratware.driveServo()
       tf = time.ticks_ms()
       ratware.srvPauseTime += time.ticks_diff(tf, ti)
-      print(ratware.srvPauseTime)
+      ratware.stuck = False
+      # print(ratware.srvPauseTime)
       
     if (ratware.path.shape[0] != 0):
       ratware.scurry(ratware.path[0,0], ratware.path[0,1])
       ratware.updateRatPose()
-      ratware.checkTargetReached(ratware.path[0,0], ratware.path[0,1])
+      if ratware.stuck: continue
+      if (ratware.checkTargetReached(ratware.path[0,0], ratware.path[0,1])):
+        ratware.motorOff()
     
     ratware.isr1()
     ratware.isr2()
@@ -66,3 +74,5 @@ def loop():
 
 init()
 loop()
+#ratware.testPath([[0, 30], [20, 50], [0, 30], [0, 0]])
+#ratware.testPath([[-20, 5]])

@@ -8,7 +8,6 @@ try:
     import network
     from machine import UART
     import time
-    import deflate, io
 except ImportError:
     import numpy as np
 
@@ -16,9 +15,8 @@ from mapping import NUM_RATS, MAP_SIZE, mazeMap, overlayMaps
 from ratware import worldX, worldY, otherRatPos
 
 # MAC Addresses of all RAT ESP boards
-broadcastAddys = [b'\x90\x70\x69\x07\x11\x64', 
-                  b'\xe4\x65\xb8\x6f\x2d\x50']
-NUM_RATS = 2
+broadcastAddys = [b'\x90\x70\x69\x07\x11\x64']
+NUM_RATS = 1
 SQUEAK_RATE = 10 * 1000  # Time between messages [ms]
 MY_ID = 0  # Personal Rat ID (corresponds to index in broadcastAddys array)
 MAX_MESSAGE_SIZE = 200  # Max ints that can be broadcast per message
@@ -93,7 +91,7 @@ def squeak(otherID=None):
             endInd = mazeMap.size
           myMessage = encodeMessage(n+2, mazeMap.flatten()[n*MAX_MESSAGE_SIZE:endInd])
           enow.send(broadcastAddys[i], myMessage)
-          sentMap = decodeMessage(myMessage)[1]
+          #sentMap = decodeMessage(myMessage)[1]
           #print("Index: " + str(decodeMessage(myMessage)[0]) + " | Message: " + str(sentMap) + " (size: " + str(sentMap.size) + ")")
         print("All messages sent to Rat " + str(i))
     except OSError:

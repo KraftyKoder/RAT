@@ -38,26 +38,32 @@ MOTORPWRCAP = 0.9 * 65535
 # L1_ADDR = 0x30
 # L2_ADDR = 0x31
 
-SRV_MAX = np.radians(182)
+SRV_MAX =  np.radians(182)
 SRV_MIN = np.radians(-178)
-SRV_MIN_NS = 1425 * 1000   # >= 500
+SRV_MIN_NS = 1400 * 1000   # >= 500
 SRV_MAX_NS = 1575 * 1000   # <= 2500
 SRV_STOP_NS = 1500 * 1000    # tune
 SRV_STEP = 5
 SRV_MS = 40
-SRV_BLIND_TIME = 500
+SRV_BLIND_TIME = 1400
 SRV_TIMEOUT = 7500
 
 XSHUT1 = 42
 #XSHUT2 = 43
 
-WHEEL_D = 8.68   # [cm]
+WHEEL_D = 8.66   # [cm]
 ENC_CPR = 360
 WHEELBASE = 10.4   # [cm]
 
+# Sensor fusion weights
+# Rotational Position
 #GYRO_W = 0.98
-GYRO_W = 1
-MAG_W = 0.02
+GYRO_W = 0.0001
+MAG_W = 0
+ENC_ROT_W = 0.9999
+# Linear Position
+ACC_W = 0
+ENC_LIN_W = 0.9
 ACCEL_DB = 0.05
 
 # IMU Output Ranges
@@ -78,14 +84,16 @@ imu = None
 mag = None
 l1 = None
 l2 = None
-
-led = None
+accXOffset = 0
+accYOffset = 0
+accZOffset = 0
 
 lidarBuf = np.empty([MAX_PTS, 5])  # [sweep time/angle, lidarDist, worldX, worldY, worldDir] at time of measurement
 npts = 0
 LIDAR_OFFSET = -4
-LIDAR_FORWARD_SWEEP_OFFSET = np.radians(45)
-LIDAR_BACKWARD_SWEEP_OFFSET = np.radians(-18)
+LIDAR_FORWARD_SWEEP_OFFSET = 0 #np.radians(45)
+LIDAR_BACKWARD_SWEEP_OFFSET = 0 #np.radians(-18)
+LIDAR_ANGLE_SCALE = 1
 LIDAR_CAL = 4
 
 srvDir = 1
@@ -114,6 +122,7 @@ e1p = 0
 e2p = 0
 
 clock = 0
+stuck = False
 
 fellowRatDetected = np.zeros([MAX_PTS])
 otherRatPos = np.empty([mapping.NUM_RATS, 2])
@@ -125,25 +134,26 @@ lmotorFwd = None
 lmotorBk = None
 rMotorPwr = 0
 lMotorPwr = 0
+lMotorBias = 1.2
 motorT = 0
 
 # Position errors (for PID control)
 prevTurnAngle = 0
 turnAngle = 0
 turnAngleSum = 0
-K_P = 2500
-K_D = 7500
-K_I = 100
+K_P = 40000
+K_D = 35000
+K_I = 0
 
 path = np.empty([0, 2])
-PATH_RATE = 10 * 1000
+PATH_RATE = 15 * 1000
 lastPathTime = 0
 
 TARGET_TOL = 2  # Target tolerance [cm]
 RAT_DETECTION_TOL = 10  # Rat detection tolerance [cm]
 OVERLAP_SENS = 0  # Max wall detections allowed within robot bounding box
 
-MOTOR_SPEED = 0.4 * 65535  # rat nominal travel speed duty cycle
+MOTOR_SPEED = 0.5 * 65535  # rat nominal travel speed duty cycle
 TIME_STEP = 0.01  # control time step [sec]
 
 def encHandler(enc):
@@ -167,8 +177,8 @@ def isr2():
 # Initialize sensors and positions
 def initRatware():
     global worldX, worldY, worldDir, led, nsleep, i2cLidar, i2cIMU, i2cMag
-    global imu, mag, l1, l2, srv, enc1A, enc1B, enc2A, enc2B, clock, motorT, srvT
-    global rmotorFwd, rmotorBk, lmotorFwd, lmotorBk, prevTurnAngle, turnAngle, turnAngleSum, driverSleep
+    global imu, mag, l1, l2, srv, enc1A, enc1B, enc2A, enc2B, clock, motorT, srvT, accXOffset, accYOffset, accZOffset
+    global rmotorFwd, rmotorBk, lmotorFwd, lmotorBk, prevTurnAngle, turnAngle, turnAngleSum, driverSleep, stuck
 
     worldX = 0
     worldY = 0
@@ -177,10 +187,6 @@ def initRatware():
     clock = time.ticks_ms()
     motorT = clock
     srvT = clock
-
-    #led = Pin(LED, Pin.OUT)
-    #nsleep = Pin(NSLEEP, Pin.OUT)
-    #nsleep.on()
 
     i2cLidar = SoftI2C(scl=Pin(LIDAR_SCL_PIN), sda=Pin(LIDAR_SDA_PIN), freq=400000)
     devices = i2cLidar.scan()
@@ -193,15 +199,11 @@ def initRatware():
     # xshut1 = Pin(XSHUT1)
     # xshut1.on()
 
-    # i2cIMU = SoftI2C(scl=Pin(IMU_SCL_PIN), sda=Pin(IMU_SDA_PIN), freq=400000)
-    # devices = i2cIMU.scan()
-    # print("IMU: ")
-    # print(devices)
-    # imu = devices[0]
-
     imu = MPU6050()
-
-    # mag = devices[1]
+    acc = imu.read_accel_data()
+    accXOffset = acc["x"]
+    accYOffset = acc["y"]
+    accZOffset = acc["z"]
 
     srv = PWM(Pin(SERVO_PIN), freq=50, duty_ns=SRV_STOP_NS)
     srv.duty_ns(SRV_STOP_NS)
@@ -215,7 +217,6 @@ def initRatware():
     enc1A.irq(trigger=Pin.IRQ_FALLING or Pin.IRW_RISING, handler=lambda a:encHandler(a))
     enc2A.irq(trigger=Pin.IRQ_FALLING or Pin.IRW_RISING, handler=lambda a:encHandler(a))
 
-
     rmotorFwd = PWM(Pin(RMOTORFWD), freq=50, duty_ns=0)
     rmotorBk = PWM(Pin(RMOTORBK), freq=50, duty_ns=0)
     driverSleep = Pin(DRIVERSLEEP, Pin.OUT)
@@ -228,6 +229,7 @@ def initRatware():
     turnAngleSum = 0
 
     clock = time.ticks_ms()
+    stuck = False
 
     global npts, swpDone, srvStartTime, srvEndTime, srvPauseTime, srvDir, lidarBuf, fellowRatDetected, firstSweep
     npts = 0
@@ -243,12 +245,22 @@ def initRatware():
 
 # Command motors to travel in straight line to target position
 def scurry(targetX, targetY):
-    global prevTurnAngle, turnAngle, turnAngleSum, motorT
+    global prevTurnAngle, turnAngle, turnAngleSum, motorT, path, stuck
     # Position error
     prevTurnAngle = turnAngle
     deltaX = targetX - worldX
     deltaY = targetY - worldY
-    turnAngle = np.arctan2(deltaY, deltaX) - worldDir
+
+    turnAngle = np.arctan2(deltaY, deltaX)
+    if turnAngle < 0:  # Convert atan2 from [-pi,pi] to [0, 2pi]
+        turnAngle += 2*np.pi
+    turnAngle -= worldDir
+    
+    if turnAngle > np.pi:
+        turnAngle -= 2*np.pi
+    elif turnAngle < -np.pi:
+        turnAngle += 2*np.pi
+    
     turnAngleSum += turnAngle
     now = time.ticks_ms()
     dt = time.ticks_diff(now, motorT)
@@ -256,35 +268,36 @@ def scurry(targetX, targetY):
 
     print("POSE: " + str(worldX) + "|" + str(worldY) + "|" + str(np.degrees(worldDir)))
     
-    # Estimated position after TIME_STEP
-    REAL_MOTOR_SPEED = 4 # [cm/s]
-    estimateX = REAL_MOTOR_SPEED * TIME_STEP * np.cos(worldDir+turnAngle) + worldX
-    estimateY = REAL_MOTOR_SPEED * TIME_STEP * np.sin(worldDir+turnAngle) + worldY
+    turnPwr = K_P * turnAngle + K_D * (turnAngle - prevTurnAngle)/dt + K_I * turnAngleSum
+    forwardPwr = 0
+    if (abs(turnAngle) < 0.5):
+        forwardPwr = MOTOR_SPEED
 
-    # Check if robot can move in desired direction
-    # if (validPostion(estimateX, estimateY)):
-    #     # If so, drive motors towards target
-    #     turnPwr = K_P * turnAngle + K_D * (turnAngle - prevTurnAngle)/dt + K_I * turnAngleSum
-    #     rMotorPwr = MOTOR_SPEED + turnPwr
-    #     lMotorPwr = MOTOR_SPEED - turnPwr
-    #     #print(str(np.degrees(turnAngle)) + "|" + str(turnPwr) + "|" + str(rMotorPwr))
-    # else: 
-    #     # else, regenerate path
-    #     # path = mapping.explore()
-    #     # print("Invalid pos")
-    #     # motorOff()
+    # # Estimated position after TIME_STEP
+    # REAL_MOTOR_SPEED = 15 # [cm/s]
+    # estimateX = REAL_MOTOR_SPEED * TIME_STEP * np.cos(worldDir+turnAngle) + worldX
+    # estimateY = REAL_MOTOR_SPEED * TIME_STEP * np.sin(worldDir+turnAngle) + worldY
+
+    # # Check if robot can move in desired direction
+    # if (forwardPwr > 0 and not validPostion(estimateX, estimateY)):
+    #     # regenerate path
+    #     path = np.empty([0, 2])
+    #     stuck = True
+    #     print("Invalid pos")
+    #     motorOff()
     #     return
     
-    turnPwr = K_P * turnAngle + K_D * (turnAngle - prevTurnAngle)/dt + K_I * turnAngleSum
-    rMotorPwr = MOTOR_SPEED + turnPwr
+    rMotorPwr = forwardPwr + turnPwr
+    #lMotorPwr = lMotorBias * (forwardPwr - turnPwr)
     lMotorPwr = MOTOR_SPEED - turnPwr
+    print(turnAngle)
     
-    global rmotorFwd, rmotorBk, lmotorFwd, lMotorBk
+    global rmotorFwd, rmotorBk, lmotorFwd, lmotorBk
 
     if (rMotorPwr > MOTORPWRCAP): rMotorPwr = MOTORPWRCAP
     if (lMotorPwr > MOTORPWRCAP): lMotorPwr = MOTORPWRCAP
     if (rMotorPwr < -MOTORPWRCAP): rMotorPwr = -MOTORPWRCAP
-    if (rMotorPwr < -MOTORPWRCAP): lMotorPwr = -MOTORPWRCAP
+    if (lMotorPwr < -MOTORPWRCAP): lMotorPwr = -MOTORPWRCAP
 
     if rMotorPwr > 0:
         rmotorFwd.duty_u16(int(rMotorPwr))
@@ -299,7 +312,6 @@ def scurry(targetX, targetY):
         lmotorFwd.duty_u16(0)
         lmotorBk.duty_u16(int(abs(lMotorPwr)))
         
-
 
 # Check if specified position is valid
 # (Clearance for rat from edges of map, and no walls overlapping with rat)
@@ -318,19 +330,18 @@ def checkTargetReached(targetX, targetY):
     global prevTurnAngle, turnAngle, turnAngleSum, path
     reached = abs(worldX - targetX) < TARGET_TOL and abs(worldY - targetY) < TARGET_TOL
     if reached:
-        # Reset PID errors
-        prevTurnAngle = 0
-        turnAngle = 0
-        turnAngleSum = 0
-
-        print(path)
+        motorOff()
         # Remove waypoint from path
         if (path.shape[0] > 1):
             path = path[1:,:]
+            reached = False  # Haven't reached final target
         else:
             path = np.empty([0, 2])
-        print(path)
-        
+            # Reset PID errors
+            prevTurnAngle = 0
+            turnAngle = 0
+            turnAngleSum = 0
+        time.sleep(0.1)
         print("Target reached")
     return reached
 
@@ -339,7 +350,7 @@ def getWorldCoords():
 
 # Check if lidar reading coincides with another RAT, from lidarBuf data
 def checkForFellowRat():
-    global fellowRatDetected
+    global fellowRatDetected, path
     for i in range(npts):
         fellowRatDetected[i] = False
         lA = lidarBuf[i, 0]
@@ -359,6 +370,7 @@ def checkForFellowRat():
 # Read value from Lidar sensor and add point to map
 def readLidar(lidar):
     lidarDist1 = lidar.read_range_single_millimeters() / 10 + LIDAR_OFFSET
+    #lidarDist1 = lidar.read_range_continuous_millimeters() / 10 + LIDAR_OFFSET
     #print(lidarDist1)
     return lidarDist1
     # lidarDist2 = lidar.read_range_single_millimeters() / 10 + LIDAR_OFFSET
@@ -428,13 +440,16 @@ def updateRatPose():
     e1p = c1
     e2p = c2
 
-    dc = (d1 + d2) / 2.0
+    encdc = (d1 + d2) / 2.0
+    encdx = encdc * np.cos(worldDir) 
+    encdy = encdc * np.sin(worldDir) 
 
     #accX, accY, accZ, gyroX, gyroY, gyroZ = readIMU()
     acc = imu.read_accel_data()
-    accX = acc["x"]
-    accY = acc["y"]
-    accZ = acc["z"]
+    accX = (acc["x"] - accXOffset) * 100
+    accY = -(acc["y"] - accYOffset) * 100
+    accZ = -(acc["z"] - accZOffset) * 100
+    #print(str(accX) + " | " + str(accY) + " | " + str(accZ))
 
     gyro = imu.read_gyro_data()
     gyroX = gyro["x"]
@@ -442,21 +457,28 @@ def updateRatPose():
     gyroZ = gyro["z"]
 
     gh = worldDir + gyroZ * dt * np.pi / 180
+    ench = worldDir + np.atan((d1 - d2)/WHEELBASE)
     #mh = magHdg() + WORLD_DIR_OFFSET
     #while (mh - gh > 180.0):  mh -= 2*np.pi
     #while (gh - mh > 180.0):  mh += 2*np.pi
 
-    worldDir = GYRO_W * gh #+ MAG_W * mh
+    worldDir = GYRO_W * gh + ENC_ROT_W * ench #+ MAG_W * mh 
     if (worldDir < 0):    worldDir += 2*np.pi
     if (worldDir >= 2*np.pi): worldDir -= 2*np.pi
 
-    worldX += dc * np.cos(worldDir)   # CHECK IF TRIG FUNCTIONS RIGHT??
-    worldY += dc * np.sin(worldDir)
+    accdx = vx * dt
+    accdy = vy * dt
 
     if (abs(accX) > ACCEL_DB):
+        accdx += accX * dt / 2
         vx += accX * dt
     if (abs(accY) > ACCEL_DB):
+        accdy += accY * dt / 2
         vy += accY * dt
+
+    worldX += ENC_LIN_W * encdx + ACC_W * accdx
+    worldY += ENC_LIN_W * encdy + ACC_W * accdy
+    
     
     mapping.updateMapPos(worldX, worldY)
 
@@ -469,7 +491,7 @@ def sweep():
         srvOff()
         raise ValueError("SERVO TIMEOUT ERROR")
 
-    if (time.ticks_diff(now, srvT) < SRV_MS or (time.ticks_diff(now, srvEndTime) - srvPauseTime < SRV_BLIND_TIME and not firstSweep)):
+    if (time.ticks_diff(now, srvT) < SRV_MS or (time.ticks_diff(now, srvStartTime) - srvPauseTime < SRV_BLIND_TIME and not firstSweep)):
         return
     srvT = now
 
@@ -520,14 +542,14 @@ def processLidarBuffer():
     prevSrvDir = -srvDir  # Note: need to flip srvDir for preceding sweep
     swpDuration = time.ticks_diff(srvEndTime, srvStartTime) - srvPauseTime
     swpSpeed = prevSrvDir * (SRV_MAX - SRV_MIN) / swpDuration
-    lidarBuf[:, 0] = lidarBuf[:, 0] * swpSpeed
+    lidarBuf[:, 0] = lidarBuf[:, 0] * swpSpeed * LIDAR_ANGLE_SCALE
     if (prevSrvDir == 1):  # CCW
-        lidarBuf[:, 0] += SRV_MIN + LIDAR_FORWARD_SWEEP_OFFSET
+        lidarBuf[:, 0] += SRV_MIN #+ LIDAR_FORWARD_SWEEP_OFFSET
     else:  # CW
-        lidarBuf[:, 0] += SRV_MAX + LIDAR_BACKWARD_SWEEP_OFFSET
+        lidarBuf[:, 0] += SRV_MAX #+ LIDAR_BACKWARD_SWEEP_OFFSET
 
     # Print buffer
-    print(lidarBuf)
+    # print(lidarBuf)
 
     # Discard first sweep
     if (firstSweep):
@@ -551,20 +573,22 @@ def resetLidarForSweep():
     fellowRatDetected = np.zeros([MAX_PTS])
 
 # Scurry PID Tuning
-# initRatware()
+def testPath(pathInput):
+    global path
+    initRatware()
+    path = np.array(pathInput)
+    reached = False
 
-# path = np.array([[25, 100]])
-# startT = time.ticks_ms()
-# time.sleep(2)
+    startT = time.ticks_ms()
+    time.sleep(2)
 
-# while True:
-#     if path.size == 0:
-#         motorOff()
-#         break
-#     scurry(path[0, 0], path[0, 1])
-#     updateRatPose()
-#     reached = checkTargetReached(path[0, 0], path[0, 1])
-#     if (time.ticks_diff(time.ticks_ms(), startT) > 15000):
-#         motorOff()
-#         break
-#     time.sleep(TIME_STEP)
+    while not reached:
+        scurry(path[0, 0], path[0, 1])
+        updateRatPose()
+        reached = checkTargetReached(path[0, 0], path[0, 1])
+        if (time.ticks_diff(time.ticks_ms(), startT) > 15000):
+            motorOff()
+            break
+        time.sleep(TIME_STEP)
+    
+    motorOff()
